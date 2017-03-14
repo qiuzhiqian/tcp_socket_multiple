@@ -19,6 +19,7 @@
 #define MAXCONN 100		//最大连接数
 #define BUFFSIZE 1024	//
 
+int fd_out;
 
 void sig_wait_alarm(void);
 //引入alarm作为协议的超时控制
@@ -48,7 +49,8 @@ typedef struct{
 	int listenfd;					//监视文件描述符
 	int isExit;						//服务器退出状态
 	pthread_t threadID;				//服务器线程ID
-	int mode;						//通讯方式,=0透明传输,=1协议传输
+	int sendmode;						//通讯方式,=0透明传输,=1协议传输
+    int outputmode;                 //数据输出方式,=0输出到控制台,=1输出到指定文件
 }ServerInfo;
 
 pthread_mutex_t activeConnMutex;
@@ -62,7 +64,8 @@ pthread_cond_t waitCond;			//线程唤醒条件变量
 
 ServerInfo server={
 	.isExit=0,
-	.mode=0,
+	.sendmode=0,
+
 };
 ClientInfo clients[MAXCONN];
 
@@ -115,15 +118,22 @@ void clientManager(void* argv)
     { 
 		if(recvbytes==0)	break;
 
-		if(server.mode==0)		//透明传输
-		{
+		if(server.sendmode==0)		//透明传输
+		{ 
 			int i=0;
-			printf("len=%d\n",recvbytes);
-			printf("[clientIndex = %04d]", clientIndex);
-			for(i=0;i<recvbytes;i++)
-			{
-				printf("0x%02X ",(unsigned char)buff[i]);
-			}
+            if(server.outputmode!=1)
+            {
+                printf("[clientIndex = %04d]", clientIndex);
+    			for(i=0;i<recvbytes;i++)
+    		 	{
+    				printf("0x%02X ",(unsigned char)buff[i]);
+    			}
+            }
+            else
+            {
+                write(fd_out,buff,recvbytes); 
+            }
+			
 			printf("\n");
 		}
 		else
@@ -132,12 +142,8 @@ void clientManager(void* argv)
 			else{
 				if(buff[0]!=0xFB)	continue;
 				else{
-                    //unsigned short lenH=(unsigned short)buff[2]<<8;
-                    //printf("lenH=%d\n",lenH);
 					client_pkg.funcid=buff[1];
 					client_pkg.len=(((unsigned short)buff[3])<<8)+buff[2];
-                    printf("buff[2]=0x%02x,buff[3]=0x%02x\n",buff[2],buff[3]);
-                    printf("funcid=%d,len=%d\n",client_pkg.funcid,client_pkg.len);
 					if(client_pkg.len+8!=recvbytes)	continue;
 					else{
 						if(buff[7+client_pkg.len]!=0xFD)	continue;
@@ -150,17 +156,34 @@ void clientManager(void* argv)
 								{
 									//数据封装，并发送响应
 									unsigned char resBuff[8];
+                                    int i=0;
 
-									resBuff[0]=0xFB;
-									resBuff[1]=client_pkg.funcid;
-									resBuff[2]=0;
-									resBuff[3]=0;
-									resBuff[4]=0;
-									resBuff[5]=0;
-									resBuff[6]=1;
-									resBuff[7]=0xFD;
-									send(clientfd,resBuff,8,0);/*向客户端发送数据*/
-		 						}
+                                    //printf("data pkg\n");
+                                    if(server.outputmode!=1)
+                                    {
+                                        printf("[clientIndex = %04d]", clientIndex);
+                            			for(i=0;i<client_pkg.len;i++)
+                            			{
+                            				printf("0x%02X ",(unsigned char)buff[4+i]);
+                            			}
+                            			
+                                    }
+                                    else
+                                    {
+                                        write(fd_out,buff+4,client_pkg.len);
+                                    }
+                        			printf("\n");
+
+   									resBuff[0]=0xFB;
+   									resBuff[1]=client_pkg.funcid;
+   									resBuff[2]=0;
+   									resBuff[3]=0;
+   									resBuff[4]=0;
+   									resBuff[5]=0;
+   									resBuff[6]=1;
+   									resBuff[7]=0xFD;
+   									send(clientfd,resBuff,8,0);/*向客户端发送数据*/
+   	 	 						}
 								else					//响应
 								{
                                     if(waitflag==1)
@@ -185,6 +208,8 @@ void clientManager(void* argv)
 								{
 									//数据封装，并发送响应
 									unsigned char resBuff[8];
+                                    
+                                    printf("login pkg\n");
 
 									resBuff[0]=0xFB;
 									resBuff[1]=client_pkg.funcid;
@@ -217,6 +242,8 @@ void clientManager(void* argv)
 									//数据封装，并发送响应
 									unsigned char resBuff[8];
 
+                                    printf("logout pkg\n");
+
 									resBuff[0]=0xFB;
 									resBuff[1]=client_pkg.funcid;
 									resBuff[2]=0;
@@ -247,6 +274,8 @@ void clientManager(void* argv)
 								{
 									//数据封装，并发送响应
 									unsigned char resBuff[8];
+
+                                    printf("heartbeat pkg\n");
 
 									resBuff[0]=0xFB;
 									resBuff[1]=client_pkg.funcid;
@@ -344,7 +373,7 @@ void serverManager(void* argv)
 				fprintf(stdout,"wait for sending data to client %d\n>",index);
 				//	清空缓冲区，不然会影响后面的输入
 				while((c=getchar())!='\n'&&c!=EOF);
-				if(server.mode==0)										//透明传输
+				if(server.sendmode==0)										//透明传输
 				{
 					while((c=getchar())!='\n')
 					{
@@ -407,9 +436,9 @@ void serverManager(void* argv)
 		}
 		else if(strncmp(cmd,"mode",4) == 0)						//模式切换
 		{
-			int oldmode=server.mode;
-			server.mode=atoi(cmd+4);
-			if(server.mode==0)									//切换成透明模式
+			int oldmode=server.sendmode;
+			server.sendmode=atoi(cmd+4);
+			if(server.sendmode==0)									//切换成透明模式
 			{
 				if(oldmode==0)
 					printf("old mode:transport,new mode:transport\n");
@@ -435,6 +464,7 @@ int main()
 {
    int activeConn = 0;
    
+   char ch;
    //initialize the mutex 
    pthread_mutex_init(&activeConnMutex, NULL);   
    pthread_cond_init(&connDis, NULL);
@@ -454,7 +484,40 @@ int main()
    //create the server manager thread
    pthread_create(&server.threadID, NULL, (void *)(serverManager), NULL);
    
-   
+   int tempmode=0;
+   printf("Input mode(0/transport 1/protocol):");
+   scanf("%d",&tempmode);
+
+   if(tempmode==1)
+   {
+        server.sendmode=1;
+        printf("protocol mode\n");
+    }
+   else
+   {
+        server.sendmode=0;
+        printf("transport mode\n");
+    }
+
+    int tempoutmode;
+    printf("Input output mode(0/console 1/file):");
+    scanf("%d",&tempoutmode);
+    if(tempoutmode==1)
+    {
+        server.outputmode=1;
+        printf("file mode\n");
+
+        fd_out=open("./recdata.txt",O_RDWR|O_CREAT,0666);
+    }
+    else
+    {
+        server.outputmode=0;
+        printf("console mode\n");
+    }
+
+   //清空缓冲区
+   while((ch=getchar())!='\n'&&ch!=EOF);
+
    //int listenfd;
    //struct sockaddr_in  servaddr;
    int ServerPort;   
@@ -477,7 +540,6 @@ int main()
    printf("ServerPort=%d\n",ServerPort);
 
    //清空缓冲区，不然会影响后面的输入
-   char ch;
    while((ch=getchar())!='\n'&&ch!=EOF);
  
    //set the server address
@@ -569,7 +631,12 @@ int main()
        pthread_create(&clients[i].threadID, NULL, (void *)clientManager, &clients[i]);     
        
    }     //end-while
-}
+
+   if(server.outputmode==1)
+   {
+        close(fd_out);
+   }
+} 
 
 void sig_wait_alarm()
 {
