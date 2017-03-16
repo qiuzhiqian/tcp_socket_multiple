@@ -21,7 +21,6 @@
 
 int fd_out;
 
-void sig_wait_alarm(void);
 //引入alarm作为协议的超时控制
 
 typedef struct{
@@ -60,18 +59,12 @@ pthread_cond_t connDis;
 pthread_mutex_t waitMutex;			//线程挂起锁
 pthread_cond_t waitCond;			//线程唤醒条件变量
 
-//pthread_t serverManagerID;
-
 ServerInfo server={
 	.isExit=0,
 	.sendmode=0,
 
 };
 ClientInfo clients[MAXCONN];
-
-struct itimerval new_value,old_value;
-int waitflag=0;     //=0没有等待事件,=1正在等待,=2接收到响应结束等待,=3超时结束等待
-//int serverExit = 0;
 
 int anetKeepAlive(char *err, int fd, int interval);
 
@@ -185,22 +178,12 @@ void clientManager(void* argv)
    									send(clientfd,resBuff,8,0);/*向客户端发送数据*/
    	 	 						}
 								else					//响应
-								{
-                                    if(waitflag==1)
-                                    {
-                                        waitflag=2;
-    									//终止定时器
-    									new_value.it_value.tv_sec=0;
-    									new_value.it_value.tv_usec=0;
-    									new_value.it_interval=new_value.it_value;
-    									setitimer(ITIMER_REAL,&new_value,NULL);
+								{ 
+    								pthread_mutex_lock(&waitMutex);
     
-    									pthread_mutex_lock(&waitMutex);
+    								pthread_cond_signal(&waitCond);
     
-    									pthread_cond_signal(&waitCond);
-    
-    									pthread_mutex_unlock(&waitMutex);
-                                    }
+    								pthread_mutex_unlock(&waitMutex);
 		 						}
 								break;
 								case 0x01:			//上线包
@@ -387,6 +370,7 @@ void serverManager(void* argv)
 				}
 				else													//协议传输
 				{
+                    int sta=0;
 					//格式化数据
 					//发送
 					//等待响应或者超时
@@ -407,29 +391,30 @@ void serverManager(void* argv)
 					buff[6+num]=0;
 					buff[7+num]=0xFD;
 					
-					waitflag=1;         //开启等待
 					send(clients[index].clientfd,buff,8+num,0);/*向客户端发送数据*/
 					
-					new_value.it_value.tv_sec=3;			//只延时，不定时
-					new_value.it_value.tv_usec=0;
-					new_value.it_interval.tv_sec=0;
-					new_value.it_interval.tv_usec=0;
-					setitimer(ITIMER_REAL,&new_value,&old_value);
-					
-					pthread_mutex_lock(&waitMutex);
-					pthread_cond_wait(&waitCond,&waitMutex);
-					pthread_mutex_unlock(&waitMutex);
+                    struct timespec outtime;
 
-					//判断响应还是超时
-					if(waitflag==3)				                    //超时
-					{
-						printf("get response timeout\n");
-					} 
-					else if(waitflag==2)							//成功接收到应答数据
-					{ 
-						printf("response ok\n");
-					}
-                    waitflag=0;
+					pthread_mutex_lock(&waitMutex);
+                    
+                    clock_gettime(CLOCK_REALTIME,&outtime);
+                    outtime.tv_sec+=3;
+                    outtime.tv_nsec+=0;
+					sta=pthread_cond_timedwait(&waitCond,&waitMutex,&outtime);
+					pthread_mutex_unlock(&waitMutex);
+                    if(sta==0)
+                    {
+                        printf("get response ok\n");
+                        
+                    }
+                    else if(sta == ETIMEDOUT)
+                    {
+                        printf("wait timeout\n");
+                    }
+                    else
+                    {
+                        printf("other error\n");
+                    }
 				}
 			}
 			
@@ -472,7 +457,7 @@ int main()
    pthread_mutex_init(&waitMutex,NULL);
    pthread_cond_init(&waitCond,NULL);
 	
-   signal(SIGALRM,(void *)sig_wait_alarm);
+   //signal(SIGALRM,(void *)sig_wait_alarm);
 
    int i=0;
    for(;i<MAXCONN;++i)
@@ -636,22 +621,7 @@ int main()
    {
         close(fd_out);
    }
-} 
-
-void sig_wait_alarm()
-{
-	if(waitflag==1)
-    {
-        waitflag=3;
-    	printf("wait timeout\n");
-    	
-    	pthread_mutex_lock(&waitMutex);
-    	
-    	pthread_cond_signal(&waitCond);		//唤醒线程挂起
-    
-    	pthread_mutex_unlock(&waitMutex);
-    }	
-} 
+}  
 
 /* Set TCP keep alive option to detect dead peers. The interval option
  * is only used for Linux as we are using Linux-specific APIs to set
